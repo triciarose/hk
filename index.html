@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<!--
+  Health Kiosk -- "your results on your phone" page.
+
+  Publish this one file as-is (e.g. GitHub Pages), then set the kiosk's
+  HEALTH_KIOSK_RESULTS_URL to its address. It is the same for every patient
+  and holds no data: each receipt's QR code opens it with that patient's
+  results encrypted after the '#' (browsers never send that part to the
+  server). The patient types the PIN printed on the receipt and the results
+  are decrypted here, on the phone. Nothing is sent or stored anywhere --
+  the Content-Security-Policy below blocks this page from making ANY network
+  request.
+
+  The format must match kiosk/results_link.py (VERSION, ITERATIONS, the
+  byte layout, and the VITALS/FLAGS codes).
+
+  Needs HTTPS (or localhost): browsers only offer crypto.subtle there.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="theme-color" content="#ffffff">
+  <title>Your Check-up Results</title>
+  <style>
+    :root {
+      --bg: #eef2f6;
+      --surface: #ffffff;
+      --text: #102030;
+      --text-muted: #3b4a5a;
+      --border: #c9d3dd;
+      --primary: #0a5a8a;
+      --primary-strong: #074468;
+      --primary-soft: #e3eff7;
+      --go: #146c35;
+      --go-strong: #0e5228;
+      --go-soft: #e4f3e8;
+      --go-border: #8cc79f;
+      --warn: #7a4a00;
+      --warn-soft: #fff3dc;
+      --warn-border: #d9a441;
+      --danger: #a4161a;
+      --danger-soft: #fdeaea;
+      --danger-border: #e29a9c;
+      --focus: 0 0 0 5px #ffbf47;
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      font-size: 20px;
+      line-height: 1.45;
+    }
+    header {
+      background: var(--surface);
+      border-bottom: 2px solid var(--border);
+      padding: 16px;
+    }
+    header h1 { margin: 0 auto; max-width: 560px; font-size: 26px; color: var(--primary-strong); }
+    main { max-width: 560px; margin: 0 auto; padding: 20px 16px 40px; }
+    .card {
+      background: var(--surface);
+      border: 2px solid var(--border);
+      border-radius: 20px;
+      padding: 22px 20px;
+    }
+    .lead { margin: 0 0 18px; font-size: 22px; }
+    label { display: block; font-weight: 700; margin-bottom: 8px; }
+    input {
+      width: 100%;
+      min-height: 76px;
+      padding: 10px 16px;
+      border: 3px solid var(--border);
+      border-radius: 16px;
+      font: inherit;
+      font-size: 40px;
+      font-weight: 800;
+      letter-spacing: 0.25em;
+      text-align: center;
+      color: var(--text);
+      background: var(--surface);
+    }
+    input:focus { outline: none; border-color: var(--primary); box-shadow: var(--focus); }
+    button {
+      width: 100%;
+      min-height: 72px;
+      margin-top: 16px;
+      border: 3px solid transparent;
+      border-radius: 16px;
+      font: inherit;
+      font-size: 24px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    button:focus-visible { outline: none; box-shadow: var(--focus); }
+    .btn-go { background: var(--go); color: #fff; }
+    .btn-go:active { background: var(--go-strong); }
+    .btn-go:disabled { background: #d5dbe1; color: #4c5966; cursor: default; }
+    .btn-secondary { background: var(--surface); color: var(--primary-strong); border-color: var(--primary); }
+    .alert {
+      margin: 16px 0 0;
+      padding: 14px 16px;
+      border: 2px solid var(--danger-border);
+      border-radius: 14px;
+      background: var(--danger-soft);
+      color: var(--danger);
+      font-weight: 700;
+    }
+    .who { margin-bottom: 16px; }
+    .who-name { font-size: 28px; font-weight: 800; }
+    .who-meta { color: var(--text-muted); }
+    .results { display: grid; gap: 14px; }
+    .result {
+      background: var(--surface);
+      border: 2px solid var(--border);
+      border-radius: 18px;
+      padding: 16px 18px;
+    }
+    .result-label { font-size: 19px; font-weight: 700; color: var(--text-muted); }
+    .result-value { font-size: 40px; font-weight: 800; line-height: 1.1; }
+    .result-unit { margin-left: 6px; font-size: 22px; font-weight: 700; color: var(--text-muted); }
+    .result-skipped { border-style: dashed; }
+    .result-skipped .result-value { font-size: 26px; color: var(--text-muted); }
+    .pill {
+      display: inline-block;
+      margin-top: 8px;
+      padding: 4px 14px;
+      border: 2px solid;
+      border-radius: 999px;
+      font-size: 18px;
+      font-weight: 800;
+    }
+    .pill-normal { background: var(--go-soft); border-color: var(--go-border); color: var(--go-strong); }
+    .pill-low, .pill-elevated { background: var(--warn-soft); border-color: var(--warn-border); color: var(--warn); }
+    .pill-high { background: var(--danger-soft); border-color: var(--danger-border); color: var(--danger); }
+    .disclaimer {
+      margin-top: 18px;
+      padding: 14px 16px;
+      border-radius: 14px;
+      background: var(--primary-soft);
+      color: var(--primary-strong);
+      font-size: 18px;
+      font-weight: 600;
+    }
+    @media (min-width: 520px) {
+      .results { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header><h1>Your Check-up Results</h1></header>
+
+  <main>
+    <section class="card" id="view-pin" hidden>
+      <p class="lead">Type the <strong>6-digit PIN</strong> printed under the QR code on your receipt.</p>
+      <form id="pin-form" novalidate>
+        <label for="pin">PIN</label>
+        <input id="pin" name="pin" type="text" inputmode="numeric" autocomplete="off"
+               maxlength="7" placeholder="000 000" aria-describedby="pin-error">
+        <button type="submit" class="btn-go" id="pin-btn">Show my results</button>
+        <p class="alert" id="pin-error" role="alert" hidden></p>
+      </form>
+    </section>
+
+    <section id="view-results" hidden>
+      <div class="who">
+        <div class="who-name" id="r-name"></div>
+        <div class="who-meta" id="r-meta"></div>
+        <div class="who-meta" id="r-concern"></div>
+      </div>
+      <div class="results" id="r-list"></div>
+      <div class="disclaimer">
+        These labels are for reference only and are not a diagnosis.
+        Please show your results to a doctor or nurse.
+      </div>
+      <button type="button" class="btn-secondary" id="hide-btn">Hide my results</button>
+    </section>
+
+    <section class="card" id="view-message" hidden>
+      <p class="lead" id="message"></p>
+    </section>
+  </main>
+
+  <script>
+  (function () {
+    "use strict";
+
+    // Must match kiosk/results_link.py
+    var VERSION = 1;
+    var ITERATIONS = 600000;
+    // Result rows arrive as "code:value:flag" joined by ','; values are
+    // already formatted by the kiosk.
+    var VITALS = {
+      t: ["Temperature", "°C"],
+      s: ["Oxygen (SpO2)", "%"],
+      h: ["Heart Rate", "BPM"],
+      ht: ["Height", "cm"],
+      w: ["Weight", "kg"],
+      bmi: ["BMI", ""],
+      bp: ["Blood Pressure", "mmHg"],
+      p: ["Pulse", "BPM"]
+    };
+    var FLAGS = {
+      n: ["Normal", "normal"],
+      l: ["Low", "low"],
+      b: ["Below normal", "elevated"],
+      e: ["Elevated", "elevated"],
+      "1": ["High (Stage 1)", "elevated"],
+      "2": ["High (Stage 2)", "high"],
+      c: ["Hypertensive crisis", "high"],
+      u: ["Underweight", "low"],
+      o: ["Overweight", "elevated"],
+      x: ["Obese", "high"]
+    };
+
+    var views = {
+      pin: document.getElementById("view-pin"),
+      results: document.getElementById("view-results"),
+      message: document.getElementById("view-message")
+    };
+    var pinInput = document.getElementById("pin");
+    var pinBtn = document.getElementById("pin-btn");
+    var pinError = document.getElementById("pin-error");
+
+    function show(name) {
+      Object.keys(views).forEach(function (k) { views[k].hidden = k !== name; });
+    }
+
+    function showMessage(text) {
+      document.getElementById("message").textContent = text;
+      show("message");
+    }
+
+    function fromBase64Url(s) {
+      s = s.replace(/-/g, "+").replace(/_/g, "/");
+      while (s.length % 4) s += "=";
+      var bin = atob(s);
+      var out = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+
+    // blob = version[1] | salt[8] | iv[12] | AES-GCM ciphertext + tag
+    function decrypt(blob, pin) {
+      var header = blob.slice(0, 1);
+      var salt = blob.slice(1, 9);
+      var iv = blob.slice(9, 21);
+      var sealed = blob.slice(21);
+      var subtle = window.crypto.subtle;
+      return subtle.importKey("raw", new TextEncoder().encode(pin), "PBKDF2", false, ["deriveKey"])
+        .then(function (base) {
+          return subtle.deriveKey(
+            { name: "PBKDF2", salt: salt, iterations: ITERATIONS, hash: "SHA-256" },
+            base, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+        })
+        .then(function (key) {
+          return subtle.decrypt({ name: "AES-GCM", iv: iv, additionalData: header }, key, sealed);
+        })
+        .then(function (plain) {
+          return JSON.parse(new TextDecoder().decode(plain));
+        });
+    }
+
+    function formatDate(s) {
+      // "2026-10-03 16:45" (kiosk local time) -> e.g. "3 Oct 2026, 4:45 PM"
+      var m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(s || "");
+      if (!m) return s || "";
+      var d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+      return d.toLocaleString(undefined, {
+        day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit"
+      });
+    }
+
+    function el(tag, className, text) {
+      var node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;  // data only ever goes in as text
+      return node;
+    }
+
+    function render(data) {
+      document.getElementById("r-name").textContent = data.n;
+      document.getElementById("r-meta").textContent = "Age " + data.a + " · " + formatDate(data.d);
+      document.getElementById("r-concern").textContent = data.c ? "Concern: " + data.c : "";
+
+      var list = document.getElementById("r-list");
+      list.textContent = "";
+      (data.r || "").split(",").filter(Boolean).forEach(function (text) {
+        var row = text.split(":");
+        var meta = VITALS[row[0]] || [row[0], ""];
+        var card = el("article", "result");
+        card.appendChild(el("div", "result-label", meta[0]));
+        var num = el("div", "result-value", row[1]);
+        if (meta[1]) num.appendChild(el("span", "result-unit", meta[1]));
+        card.appendChild(num);
+        if (row[2]) {
+          var flag = FLAGS[row[2]] || [row[2], "elevated"];
+          card.appendChild(el("span", "pill pill-" + flag[1], flag[0]));
+        }
+        list.appendChild(card);
+      });
+      (data.x || []).forEach(function (label) {
+        var card = el("article", "result result-skipped");
+        card.appendChild(el("div", "result-label", label));
+        card.appendChild(el("div", "result-value", "Not measured"));
+        list.appendChild(card);
+      });
+      show("results");
+      window.scrollTo(0, 0);
+    }
+
+    // A different receipt's link opened in this same tab: start over with it.
+    window.addEventListener("hashchange", function () { window.location.reload(); });
+
+    var token = window.location.hash.slice(1);
+    if (!token) {
+      showMessage("Open this page by scanning the QR code on your Health Kiosk receipt.");
+      return;
+    }
+    if (!(window.crypto && window.crypto.subtle && window.TextEncoder)) {
+      showMessage("This browser can't open your results. Please try again in Chrome or Safari.");
+      return;
+    }
+    var blob;
+    try {
+      blob = fromBase64Url(token);
+    } catch (e) {
+      blob = null;
+    }
+    if (!blob || blob.length < 22 || blob[0] !== VERSION) {
+      showMessage("This link looks incomplete. Please scan the QR code on your receipt again.");
+      return;
+    }
+
+    show("pin");
+    pinInput.focus();
+
+    document.getElementById("pin-form").addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var pin = pinInput.value.replace(/\D/g, "");
+      if (pin.length !== 6) {
+        pinError.textContent = "Please type all 6 numbers of your PIN.";
+        pinError.hidden = false;
+        pinInput.focus();
+        return;
+      }
+      pinError.hidden = true;
+      pinBtn.disabled = true;
+      pinBtn.textContent = "Opening…";
+      decrypt(blob, pin)
+        .then(render)
+        .catch(function () {
+          pinError.textContent = "That PIN didn't work. Check the 6 numbers under the QR code on your receipt and try again.";
+          pinError.hidden = false;
+          pinInput.value = "";
+          pinInput.focus();
+        })
+        .then(function () {
+          pinBtn.disabled = false;
+          pinBtn.textContent = "Show my results";
+        });
+    });
+
+    document.getElementById("hide-btn").addEventListener("click", function () {
+      ["r-list", "r-name", "r-meta", "r-concern"].forEach(function (id) {
+        document.getElementById(id).textContent = "";
+      });
+      pinInput.value = "";
+      show("pin");
+      pinInput.focus();
+    });
+  })();
+  </script>
+</body>
+</html>
