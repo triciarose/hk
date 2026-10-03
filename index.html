@@ -11,8 +11,9 @@
   the Content-Security-Policy below blocks this page from making ANY network
   request.
 
-  The format must match kiosk/results_link.py (VERSION, ITERATIONS, the
-  byte layout, and the VITALS/FLAGS codes).
+  The format must match kiosk/results_link.py (format v2: the link is the
+  encrypted blob as decimal digits; VERSION, ITERATIONS, SALT/TAG sizes,
+  the packed byte layout, FIELDS/FLAGGED/FLAGS/SKIPPABLE).
 
   Needs HTTPS (or localhost): browsers only offer crypto.subtle there.
 -->
@@ -174,7 +175,6 @@
       <div class="who">
         <div class="who-name" id="r-name"></div>
         <div class="who-meta" id="r-meta"></div>
-        <div class="who-meta" id="r-concern"></div>
       </div>
       <div class="results" id="r-list"></div>
       <div class="disclaimer">
@@ -193,33 +193,45 @@
   (function () {
     "use strict";
 
-    // Must match kiosk/results_link.py
-    var VERSION = 1;
+    // ---- Must match kiosk/results_link.py (format v2) ----
+    var VERSION = 2;
     var ITERATIONS = 600000;
-    // Result rows arrive as "code:value:flag" joined by ','; values are
-    // already formatted by the kiosk.
-    var VITALS = {
-      t: ["Temperature", "°C"],
-      s: ["Oxygen (SpO2)", "%"],
-      h: ["Heart Rate", "BPM"],
-      ht: ["Height", "cm"],
-      w: ["Weight", "kg"],
-      bmi: ["BMI", ""],
-      bp: ["Blood Pressure", "mmHg"],
-      p: ["Pulse", "BPM"]
+    var SALT_BYTES = 6;
+    var TAG_BITS = 64;
+
+    function u16(b) { return (b[0] << 8) | b[1]; }
+    function tenths(b) { return (u16(b) / 10).toFixed(1); }
+
+    // Value fields in presence-bit (and byte) order: code, label, unit, bytes, decode
+    var FIELDS = [
+      ["t", "Temperature", "°C", 1, function (b) { return (30 + b[0] / 10).toFixed(1); }],
+      ["s", "Oxygen (SpO2)", "%", 1, function (b) { return String(b[0]); }],
+      ["h", "Heart Rate", "BPM", 1, function (b) { return String(b[0]); }],
+      ["ht", "Height", "cm", 2, tenths],
+      ["w", "Weight", "kg", 2, tenths],
+      ["bp", "Blood Pressure", "mmHg", 2, function (b) { return (b[0] + 50) + "/" + b[1]; }],
+      ["p", "Pulse", "BPM", 1, function (b) { return String(b[0]); }],
+      ["bmi", "BMI", "", 2, tenths]
+    ];
+    var FLAGGED = ["t", "s", "h", "bmi", "bp"];   // flag nibble order
+    var FLAGS = {                                  // nibble code -> label, colour
+      1: ["Normal", "normal"],
+      2: ["Low", "low"],
+      3: ["Below normal", "elevated"],
+      4: ["Elevated", "elevated"],
+      5: ["High (Stage 1)", "elevated"],
+      6: ["High (Stage 2)", "high"],
+      7: ["Hypertensive crisis", "high"],
+      8: ["Underweight", "low"],
+      9: ["Overweight", "elevated"],
+      10: ["Obese", "high"],
+      15: ["See your receipt", "elevated"]
     };
-    var FLAGS = {
-      n: ["Normal", "normal"],
-      l: ["Low", "low"],
-      b: ["Below normal", "elevated"],
-      e: ["Elevated", "elevated"],
-      "1": ["High (Stage 1)", "elevated"],
-      "2": ["High (Stage 2)", "high"],
-      c: ["Hypertensive crisis", "high"],
-      u: ["Underweight", "low"],
-      o: ["Overweight", "elevated"],
-      x: ["Obese", "high"]
-    };
+    // Skipped-vitals bits, in flow.CANONICAL_ORDER
+    var SKIPPABLE = ["Height", "Weight", "Temperature", "Oxygen & Heart Rate", "Blood Pressure"];
+    // Display order = the receipt's order
+    var DISPLAY = ["t", "s", "h", "ht", "w", "bmi", "bp", "p"];
+    // --------------------------------------------------------
 
     var views = {
       pin: document.getElementById("view-pin"),
@@ -239,21 +251,29 @@
       show("message");
     }
 
-    function fromBase64Url(s) {
-      s = s.replace(/-/g, "+").replace(/_/g, "/");
-      while (s.length % 4) s += "=";
-      var bin = atob(s);
-      var out = new Uint8Array(bin.length);
-      for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-      return out;
+    // Decimal digits -> bytes (big-endian). Plain arithmetic rather than
+    // BigInt, so older phones work too.
+    function digitsToBytes(s) {
+      var le = [0];
+      for (var i = 0; i < s.length; i++) {
+        var carry = s.charCodeAt(i) - 48;
+        for (var j = 0; j < le.length; j++) {
+          var v = le[j] * 10 + carry;
+          le[j] = v & 255;
+          carry = v >> 8;
+        }
+        while (carry) { le.push(carry & 255); carry >>= 8; }
+      }
+      while (le.length > 1 && le[le.length - 1] === 0) le.pop();
+      return new Uint8Array(le.reverse());
     }
 
-    // blob = version[1] | salt[8] | iv[12] | AES-GCM ciphertext + tag
+    // blob = version[1] | salt[6] | ciphertext | tag[8]. Each receipt's
+    // random salt gives it its own key, so the IV is a fixed 12 zero bytes.
     function decrypt(blob, pin) {
       var header = blob.slice(0, 1);
-      var salt = blob.slice(1, 9);
-      var iv = blob.slice(9, 21);
-      var sealed = blob.slice(21);
+      var salt = blob.slice(1, 1 + SALT_BYTES);
+      var sealed = blob.slice(1 + SALT_BYTES);
       var subtle = window.crypto.subtle;
       return subtle.importKey("raw", new TextEncoder().encode(pin), "PBKDF2", false, ["deriveKey"])
         .then(function (base) {
@@ -262,21 +282,36 @@
             base, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
         })
         .then(function (key) {
-          return subtle.decrypt({ name: "AES-GCM", iv: iv, additionalData: header }, key, sealed);
+          return subtle.decrypt(
+            { name: "AES-GCM", iv: new Uint8Array(12), additionalData: header, tagLength: TAG_BITS },
+            key, sealed);
         })
-        .then(function (plain) {
-          return JSON.parse(new TextDecoder().decode(plain));
-        });
+        .then(function (plain) { return new Uint8Array(plain); });
     }
 
-    function formatDate(s) {
-      // "2026-10-03 16:45" (kiosk local time) -> e.g. "3 Oct 2026, 4:45 PM"
-      var m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(s || "");
-      if (!m) return s || "";
-      var d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
-      return d.toLocaleString(undefined, {
-        day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit"
+    function parse(pt) {
+      var minutes = (pt[0] << 16) | (pt[1] << 8) | pt[2];
+      var present = pt[4];
+      var skippedBits = pt[5];
+      var nibbles = [pt[6] >> 4, pt[6] & 15, pt[7] >> 4, pt[7] & 15, pt[8] >> 4, pt[8] & 15];
+      var flags = {};
+      FLAGGED.forEach(function (code, i) { flags[code] = nibbles[i]; });
+      var pos = 9;
+      var values = {};
+      FIELDS.forEach(function (f, i) {
+        if (present & (1 << i)) {
+          values[f[0]] = f[4](pt.slice(pos, pos + f[3]));
+          pos += f[3];
+        }
       });
+      return {
+        name: new TextDecoder().decode(pt.slice(pos)),
+        age: pt[3],
+        when: new Date(2025, 0, 1, 0, minutes),  // kiosk local time
+        values: values,
+        flags: flags,
+        skipped: SKIPPABLE.filter(function (_, i) { return skippedBits & (1 << i); })
+      };
     }
 
     function el(tag, className, text) {
@@ -287,27 +322,28 @@
     }
 
     function render(data) {
-      document.getElementById("r-name").textContent = data.n;
-      document.getElementById("r-meta").textContent = "Age " + data.a + " · " + formatDate(data.d);
-      document.getElementById("r-concern").textContent = data.c ? "Concern: " + data.c : "";
+      document.getElementById("r-name").textContent = data.name;
+      document.getElementById("r-meta").textContent = "Age " + data.age + " · " +
+        data.when.toLocaleString(undefined, {
+          day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit"
+        });
 
+      var meta = {};
+      FIELDS.forEach(function (f) { meta[f[0]] = f; });
       var list = document.getElementById("r-list");
       list.textContent = "";
-      (data.r || "").split(",").filter(Boolean).forEach(function (text) {
-        var row = text.split(":");
-        var meta = VITALS[row[0]] || [row[0], ""];
+      DISPLAY.forEach(function (code) {
+        if (!(code in data.values)) return;
         var card = el("article", "result");
-        card.appendChild(el("div", "result-label", meta[0]));
-        var num = el("div", "result-value", row[1]);
-        if (meta[1]) num.appendChild(el("span", "result-unit", meta[1]));
+        card.appendChild(el("div", "result-label", meta[code][1]));
+        var num = el("div", "result-value", data.values[code]);
+        if (meta[code][2]) num.appendChild(el("span", "result-unit", meta[code][2]));
         card.appendChild(num);
-        if (row[2]) {
-          var flag = FLAGS[row[2]] || [row[2], "elevated"];
-          card.appendChild(el("span", "pill pill-" + flag[1], flag[0]));
-        }
+        var flag = FLAGS[data.flags[code]];
+        if (flag) card.appendChild(el("span", "pill pill-" + flag[1], flag[0]));
         list.appendChild(card);
       });
-      (data.x || []).forEach(function (label) {
+      data.skipped.forEach(function (label) {
         var card = el("article", "result result-skipped");
         card.appendChild(el("div", "result-label", label));
         card.appendChild(el("div", "result-value", "Not measured"));
@@ -329,14 +365,9 @@
       showMessage("This browser can't open your results. Please try again in Chrome or Safari.");
       return;
     }
-    var blob;
-    try {
-      blob = fromBase64Url(token);
-    } catch (e) {
-      blob = null;
-    }
-    if (!blob || blob.length < 22 || blob[0] !== VERSION) {
-      showMessage("This link looks incomplete. Please scan the QR code on your receipt again.");
+    var blob = /^\d+$/.test(token) ? digitsToBytes(token) : null;
+    if (!blob || blob.length < 1 + SALT_BYTES + 9 + TAG_BITS / 8 || blob[0] !== VERSION) {
+      showMessage("This link is incomplete, or from an older receipt. Please scan the QR code on your receipt again.");
       return;
     }
 
@@ -356,7 +387,7 @@
       pinBtn.disabled = true;
       pinBtn.textContent = "Opening…";
       decrypt(blob, pin)
-        .then(render)
+        .then(function (pt) { render(parse(pt)); })
         .catch(function () {
           pinError.textContent = "That PIN didn't work. Check the 6 numbers under the QR code on your receipt and try again.";
           pinError.hidden = false;
@@ -370,7 +401,7 @@
     });
 
     document.getElementById("hide-btn").addEventListener("click", function () {
-      ["r-list", "r-name", "r-meta", "r-concern"].forEach(function (id) {
+      ["r-list", "r-name", "r-meta"].forEach(function (id) {
         document.getElementById(id).textContent = "";
       });
       pinInput.value = "";
