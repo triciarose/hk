@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  Health Kiosk -- "your results on your phone" page.
+  VitalVerse -- "your results on your phone" page.
 
   Publish this one file as-is (e.g. GitHub Pages), then set the kiosk's
   HEALTH_KIOSK_RESULTS_URL to its address. It is the same for every patient
@@ -26,7 +26,7 @@
   <meta name="referrer" content="no-referrer">
   <meta name="robots" content="noindex, nofollow">
   <meta name="theme-color" content="#ffffff">
-  <title>Your Check-up Results</title>
+  <title>Your Check-up Results · VitalVerse</title>
   <style>
     :root {
       --bg: #eef2f6;
@@ -66,6 +66,7 @@
       padding: 16px;
     }
     header h1 { margin: 0 auto; max-width: 560px; font-size: 26px; color: var(--primary-strong); }
+    header .brand { max-width: 560px; margin: 0 auto 2px; font-size: 15px; font-weight: 700; letter-spacing: 0.04em; color: var(--text-muted); }
     main { max-width: 560px; margin: 0 auto; padding: 20px 16px 40px; }
     .card {
       background: var(--surface);
@@ -157,7 +158,7 @@
   </style>
 </head>
 <body>
-  <header><h1>Your Check-up Results</h1></header>
+  <header><div class="brand">VitalVerse</div><h1>Your Check-up Results</h1></header>
 
   <main>
     <section class="card" id="view-pin" hidden>
@@ -358,7 +359,7 @@
 
     var token = window.location.hash.slice(1);
     if (!token) {
-      showMessage("Open this page by scanning the QR code on your Health Kiosk receipt.");
+      showMessage("Open this page by scanning the QR code on your VitalVerse receipt.");
       return;
     }
     if (!(window.crypto && window.crypto.subtle && window.TextEncoder)) {
